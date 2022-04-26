@@ -1,0 +1,290 @@
+---
+title: "Truancy Rate Data Prep"
+author: "Richard Robbins"
+date: \today
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+if (!require("here")) install.packages("here")
+if (!require("Hmisc")) install.packages("Hmisc")
+if (!require("janitor")) install.packages("janitor")
+if (!require("labelled")) install.packages("labelled")
+
+library(here)
+library(Hmisc)
+library(janitor)
+library(labelled)
+library(patchwork)
+library(readxl)
+library(tidyverse)
+
+`%notin%` <- Negate(`%in%`)
+```
+
+```{r district and school base data}
+
+# A list of Colorado online learning schools appears at:
+# https://www.cde.state.co.us/onlinelearning/schools
+# The following pattern is used to filter those schools from the list of
+# schools included in the dataset used in this chunk.
+
+online_school_filters <- paste(
+"ONLINE",
+"ON-LINE",
+"VIRTUAL",
+"AIM GLOBAL",
+"BOULDER UNIVERSAL",
+"COLORADO CONNECTIONS ACADEMY",
+"COLORADO DIGITAL",
+"COLORADO PREPARATORY ACADEMY",
+"DESTINATIONS CAREER ACADEMY",
+"EARLY COLLEGE ACADEMY",
+"EDCSD",
+"ELEVATE ACADEMY",
+"GOAL ACADEMY",
+"GRAND RIVER ACADEMY",
+"HOLYOKE ALTERNATIVE SCHOOL",
+"HOME SCHOOL",
+"HOMESCHOOL",
+"IMMERSION SCHOOLS",
+"JOURNEY K8",
+"PARAGON LEARNING",
+"PATHWAYS FUTURE",
+"PIKES PEAK EARLY COLLEGE",
+"SD GLOBAL",
+"SHARED SCHOOL",
+"SOUTHWEST COLORADO E-SCHOOL",
+"SPRINGS STUDIO",
+"TCA COLLEGE",
+"WORLD ACADEMY",
+sep="|")
+  
+df <- read_excel("2018-19_Membership_Grade_bySchool.xlsx",
+  skip=2) %>%
+  drop_na () %>%
+  clean_names() %>%
+
+  # remove rows where the only pupils are pre-school
+  filter (pk_12_count - pre_k - half_day_k - full_day_k > 0) %>%
+
+  # remove rows with school name "Not in a school" or "No School" %>%
+  filter (school_name %notin% c("Not in a school", "No school")) %>%
+  
+  # remove online schools
+  filter (!str_detect(school_name, online_school_filters)) %>%
+  rename (district_code = distr_code) %>%
+  rename (district_name = distr_name) %>%
+  rename (school_code = sch_code) %>%
+
+  # identify schools that are only high schools and 
+  # identify schools that provide high school classes and more
+  mutate (high_school = x9th + x10th + x11th + x12th == pk_12_count) %>%
+  mutate (high_school_plus = x9th + x10th + x11th + x12th > 0) %>%
+
+    # remove jail schools
+  filter (!str_detect (school_name, "COUNTY JAIL"))
+
+df.schools <- df
+
+df.consolidated <- df %>% 
+  select (county_code, county_name, district_code, district_name, 
+          school_code, school_name, high_school, high_school_plus)
+```
+
+```{r charter schools}
+df <- read_excel ("School Building Codes 2019-20.xlsx", skip=3) %>%
+  drop_na() %>%
+  clean_names() %>%
+  rename ("school_code" = "sch_code") %>%
+  mutate (charter = charter == "Y") %>%
+  select (district_code, school_code, charter)
+
+df.charter_school_flag <- df
+
+df.consolidated <- left_join (df.consolidated, df.charter_school_flag,
+                              by= c("district_code", "school_code")) %>%
+
+  # District code "8001" is comprised of charter schools, some of which
+  # may not have been included in the Building Codes file
+  # The following code fragment also maps N/A to FALSE
+
+  mutate (charter = case_when (
+    charter ~ TRUE,
+    district_code == "8001" ~ TRUE,
+    TRUE ~ FALSE))
+```
+
+```{r attendance data}
+df <- read_excel("Attendance and Truancy Rates by School 2018-2019.xlsx",
+                 skip=12) %>%
+  drop_na() %>%
+  clean_names() %>%
+  rename_with(str_replace, pattern = "_for_all_students", replacement = "") %>%
+  rename_with(str_replace, pattern = "total_", replacement = "") %>%
+  rename_with(str_replace, pattern = "student_", replacement = "") %>%
+  rename_with(str_replace, pattern = "fall_pk_12_", replacement = "") %>%
+  select (-ends_with("name")) %>%
+  select (-ends_with("school_year")) %>%
+  select (-c("days_attended", "days_excused_absence", "attendance_rate")) %>%
+
+  # remove schools with zero reported unexcused absent days
+  filter (days_unexcused_absent > 9)
+
+df.attendance <- df
+
+df.consolidated <- inner_join (df.consolidated, df.attendance,
+                              by = c("county_code", "district_code", "school_code"))
+```
+
+```{r student teacher ratio data}
+df <- read_excel ("2018-19 Student Teacher Ratios.xlsx", skip=2) %>%
+  drop_na() %>% 
+  clean_names() %>%
+  select (-ends_with("name")) %>%
+  select (-pk_12_count)
+
+df.student_teacher_ratios <- df
+
+df.consolidated <- inner_join (df.consolidated, df.student_teacher_ratios,
+                              by = c("county_code", "district_code", "school_code"))
+
+```
+
+```{r free reduced lunch data by school}
+df <- read_excel ("2018-19-PK12-FRL-bySchool.xlsx", skip=2) %>%
+  drop_na()
+
+df <- df %>% clean_names() %>%
+  filter(school_code != "0000") %>%
+  filter(percent_free_and_reduced != "N/A") %>%
+  mutate(pk_12_count = as.numeric (pk_12_count)) %>%
+  mutate(free_lunch = as.numeric (free_lunch)) %>%
+  mutate(reduced_lunch = as.numeric(reduced_lunch)) %>%
+  mutate(not_eligible = as.numeric(not_eligible)) %>%
+  mutate(free_and_reduced_count = as.numeric(free_and_reduced_count)) %>%
+  mutate(percent_free = as.numeric(percent_free)) %>%
+  mutate(percent_reduced = as.numeric(percent_reduced)) %>%
+  mutate(percent_free_and_reduced = as.numeric(percent_free_and_reduced))
+
+lunch_stats <- list (mean = mean(df$percent_free_and_reduced),
+                     sd = sd(df$percent_free_and_reduced),
+                     low = mean(df$percent_free_and_reduced) -
+                       sd(df$percent_free_and_reduced),
+                     high = mean(df$percent_free_and_reduced) +
+                       sd(df$percent_free_and_reduced))
+
+df <- df %>%
+  mutate(lunch_subsidy_eligibility = case_when(
+    percent_free_and_reduced > lunch_stats$high ~ "HIGH",
+    percent_free_and_reduced < lunch_stats$low ~ "LOW",
+    TRUE ~ "AVG")) %>%
+  mutate(lunch_subsidy_eligibility = as_factor(lunch_subsidy_eligibility)) %>%
+  select (-ends_with("name")) %>%
+  select (-c("pk_12_count", "not_eligible", "free_lunch", "reduced_lunch", 
+             "percent_free", "percent_reduced"))
+
+df.free_and_reduced_lunch <- df
+
+df.consolidated <- inner_join (df.consolidated, df.free_and_reduced_lunch,
+                              by = c("county_code", "district_code", "school_code"))
+```
+
+```{r teacher salary data, message=FALSE}
+df <- read_excel ("2018-19 Average Teacher Salary by District.xlsx", skip=3) %>%
+  drop_na()
+
+colnames(df) <- c("organization_code", "organization_name", 
+                 "charter_fte", "charter_average_salary", 
+                 "non_charter_fte", "non_charter_salary", 
+                 "all_fte", "all_average")    
+
+df <- df %>%
+  select (-ends_with("name")) %>%
+  select (-ends_with("fte")) %>%
+  mutate(charter_average_salary = as.numeric(charter_average_salary)) %>%
+  mutate(non_charter_salary = as.numeric(non_charter_salary)) %>%
+  mutate(all_average = as.numeric(all_average))
+
+df[, "charter_average_salary"][df[, "charter_average_salary"] == 0] <- NA
+  
+df.teacher_salaries <- df
+
+df.consolidated <- inner_join(df.consolidated, df.teacher_salaries,
+                             by = c("district_code" = "organization_code")) %>%
+  mutate (average_salary = if_else(charter, 
+                                   charter_average_salary, 
+                                   non_charter_salary)) %>%
+  select(-c(all_average, charter_average_salary, non_charter_salary))
+
+df.consolidated.school <- df.consolidated
+```
+
+```{r build consolidated by district}
+
+df <- df.consolidated %>%
+  group_by(county_code, county_name, district_code, district_name) %>%
+  summarise(enrollment = sum(enrollment),
+            days_possible_attendance = sum(days_possible_attendance),
+            days_unexcused_absent = sum(days_unexcused_absent),
+            truancy_rate = days_unexcused_absent / days_possible_attendance,
+            teacher_fte = sum(teacher_fte),
+            pupil_teacher_fte_ratio = enrollment / teacher_fte,
+            free_and_reduced_count = sum(free_and_reduced_count),
+            percent_free_and_reduced = free_and_reduced_count / enrollment,
+            .groups = "keep") %>%
+  ungroup()
+
+df.district_subsidy <- read_excel ("2018-19_PK12_FRL_byDistrict.xlsx", 
+                                   skip=2) %>%
+  drop_na() %>% clean_names() %>%
+  filter(percent_free_and_reduced != "N/A") %>%
+  mutate(pk_12_count = as.numeric (pk_12_count)) %>%
+  mutate(free_lunch_eligible = as.numeric (free_lunch_eligible)) %>%
+  mutate(reduced_lunch_eligible = as.numeric(reduced_lunch_eligible)) %>%
+  mutate(not_eligible = as.numeric(not_eligible)) %>%
+  mutate(free_and_reduced = as.numeric(free_and_reduced)) %>%
+  mutate(percent_free = as.numeric(percent_free)) %>%
+  mutate(percent_reduced = as.numeric(percent_reduced)) %>%
+  mutate(percent_free_and_reduced = as.numeric(percent_free_and_reduced))
+
+district_lunch_stats <- list (mean = mean(df.district_subsidy$percent_free_and_reduced),
+                              sd = sd(df.district_subsidy$percent_free_and_reduced),
+                              low = mean(df.district_subsidy$percent_free_and_reduced) -
+                                sd(df.district_subsidy$percent_free_and_reduced),
+                              high = mean(df.district_subsidy$percent_free_and_reduced) +
+                                sd(df.district_subsidy$percent_free_and_reduced))
+
+df <- df %>%
+  mutate(lunch_subsidy_eligibility = case_when(
+    percent_free_and_reduced > lunch_stats$high ~ "HIGH",
+    percent_free_and_reduced < lunch_stats$low ~ "LOW",
+    TRUE ~ "AVG")) %>%
+  mutate(lunch_subsidy_eligibility = as_factor(lunch_subsidy_eligibility))
+
+
+df <- inner_join(df, df.teacher_salaries,
+                 by = c("district_code" = "organization_code")) %>%
+  rename (average_salary = all_average)%>%
+  select(-c(charter_average_salary, non_charter_salary))
+
+df.consolidated.district <- df
+```
+
+```{r write data frame collection as a named list, message=FALSE}
+saveRDS (list (attendance = df.attendance,
+               charter = df.charter_school_flag,
+               free_and_reduced_lunch = df.free_and_reduced_lunch,
+               schools = df.schools,
+               student_teacher_ratios = df.student_teacher_ratios,
+               teacher_salaries = df.teacher_salaries,
+               consolidated.school = df.consolidated,
+               consolidated.district = df.consolidated.district,
+               subsidy_stats = district_lunch_stats),
+         file = "awesome_data.rds")
+```         
+
+
+
